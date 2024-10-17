@@ -1,6 +1,9 @@
 package gol
 
-import "uk.ac.bris.cs/gameoflife/util"
+import (
+	"fmt"
+	"uk.ac.bris.cs/gameoflife/util"
+)
 
 type distributorChannels struct {
 	events     chan<- Event
@@ -20,15 +23,30 @@ func distributor(p Params, c distributorChannels) {
 		world[i] = make([]byte, p.ImageWidth)
 	}
 
+	c.ioCommand <- ioInput
+	c.ioFilename <- fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
+	for y := 0; y < p.ImageHeight; y++ {
+		for x := 0; x < p.ImageWidth; x++ {
+			world[y][x] = <-c.ioInput
+		}
+	}
+
 	turn := 0
 	c.events <- StateChange{turn, Executing}
 
 	// TODO: Execute all turns of the Game of Life.
-	for i := 0; i < p.Turns; i++ {
+	for turn := 0; turn < p.Turns; turn++ {
 		world = calculateNextState(p, world)
 	}
 	// TODO: Report the final state using FinalTurnCompleteEvent.
-	
+
+	finalAliveCells := make([]util.Cell, p.ImageWidth*p.ImageHeight)
+	_, finalAliveCells = calculateAliveCells(p, world)
+
+	finalstate := FinalTurnComplete{p.Turns, finalAliveCells}
+
+	c.events <- finalstate
+
 	// Make sure that the Io has finished any output before exiting.
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
@@ -45,6 +63,34 @@ func calculateNextState(p Params, world [][]byte) [][]byte {
 
 	for i := range nextWorld {
 		nextWorld[i] = make([]byte, p.ImageWidth)
+	}
+
+	for y := 0; y < p.ImageHeight; y++ {
+		for x := 0; x < p.ImageWidth; x++ {
+			// Sum up the alive neighbors
+			sum := int(world[(y+p.ImageHeight-1)%p.ImageHeight][(x+p.ImageWidth-1)%p.ImageWidth])/255 +
+				int(world[(y+p.ImageHeight-1)%p.ImageHeight][x%p.ImageWidth])/255 +
+				int(world[(y+p.ImageHeight-1)%p.ImageHeight][(x+p.ImageWidth+1)%p.ImageWidth])/255 +
+				int(world[y%p.ImageHeight][(x+p.ImageWidth-1)%p.ImageWidth])/255 +
+				int(world[y%p.ImageHeight][(x+p.ImageWidth+1)%p.ImageWidth])/255 +
+				int(world[(y+p.ImageHeight+1)%p.ImageHeight][(x+p.ImageWidth-1)%p.ImageWidth])/255 +
+				int(world[(y+p.ImageHeight+1)%p.ImageHeight][x%p.ImageWidth])/255 +
+				int(world[(y+p.ImageHeight+1)%p.ImageHeight][(x+p.ImageWidth+1)%p.ImageWidth])/255
+
+			if world[y][x] == 255 {
+				if sum < 2 || sum > 3 {
+					nextWorld[y][x] = 0 // Cell dies
+				} else {
+					nextWorld[y][x] = 255 // Cell stays alive
+				}
+			} else {
+				if sum == 3 {
+					nextWorld[y][x] = 255 // Dead cell becomes alive
+				} else {
+					nextWorld[y][x] = 0 // Dead cell stays dead
+				}
+			}
+		}
 	}
 
 	countAlive := func(y, x int) int {
@@ -84,14 +130,16 @@ func calculateNextState(p Params, world [][]byte) [][]byte {
 	return nextWorld
 }
 
-func calculateAliveCells(p Params, world [][]byte) []util.Cell {
+func calculateAliveCells(p Params, world [][]byte) (int, []util.Cell) {
 	var alive []util.Cell
+	count := 0
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
 			if world[y][x] == 255 {
+				count++
 				alive = append(alive, util.Cell{X: x, Y: y})
 			}
 		}
 	}
-	return alive
+	return count, alive
 }
