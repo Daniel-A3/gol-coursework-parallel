@@ -65,34 +65,6 @@ func calculateNextState(p Params, world [][]byte) [][]byte {
 		nextWorld[i] = make([]byte, p.ImageWidth)
 	}
 
-	for y := 0; y < p.ImageHeight; y++ {
-		for x := 0; x < p.ImageWidth; x++ {
-			// Sum up the alive neighbors
-			sum := int(world[(y+p.ImageHeight-1)%p.ImageHeight][(x+p.ImageWidth-1)%p.ImageWidth])/255 +
-				int(world[(y+p.ImageHeight-1)%p.ImageHeight][x%p.ImageWidth])/255 +
-				int(world[(y+p.ImageHeight-1)%p.ImageHeight][(x+p.ImageWidth+1)%p.ImageWidth])/255 +
-				int(world[y%p.ImageHeight][(x+p.ImageWidth-1)%p.ImageWidth])/255 +
-				int(world[y%p.ImageHeight][(x+p.ImageWidth+1)%p.ImageWidth])/255 +
-				int(world[(y+p.ImageHeight+1)%p.ImageHeight][(x+p.ImageWidth-1)%p.ImageWidth])/255 +
-				int(world[(y+p.ImageHeight+1)%p.ImageHeight][x%p.ImageWidth])/255 +
-				int(world[(y+p.ImageHeight+1)%p.ImageHeight][(x+p.ImageWidth+1)%p.ImageWidth])/255
-
-			if world[y][x] == 255 {
-				if sum < 2 || sum > 3 {
-					nextWorld[y][x] = 0 // Cell dies
-				} else {
-					nextWorld[y][x] = 255 // Cell stays alive
-				}
-			} else {
-				if sum == 3 {
-					nextWorld[y][x] = 255 // Dead cell becomes alive
-				} else {
-					nextWorld[y][x] = 0 // Dead cell stays dead
-				}
-			}
-		}
-	}
-
 	countAlive := func(y, x int) int {
 		alive := 0
 		for i := -1; i < 2; i++ {
