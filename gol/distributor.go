@@ -43,9 +43,9 @@ func distributor(p Params, c distributorChannels) {
 	finalAliveCells := make([]util.Cell, p.ImageWidth*p.ImageHeight)
 	_, finalAliveCells = calculateAliveCells(p, world)
 
-	finalstate := FinalTurnComplete{p.Turns, finalAliveCells}
+	finalState := FinalTurnComplete{p.Turns, finalAliveCells}
 
-	c.events <- finalstate
+	c.events <- finalState
 
 	// Make sure that the Io has finished any output before exiting.
 	c.ioCommand <- ioCheckIdle
