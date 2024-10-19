@@ -31,12 +31,55 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}
 
+	// List of channels for workers
+	channels := make([]chan [][]byte, p.Threads)
+
 	turn := 0
 	c.events <- StateChange{turn, Executing}
 
 	// TODO: Execute all turns of the Game of Life.
-	for turn := 0; turn < p.Turns; turn++ {
-		world = calculateNextState(p, world)
+	//for turn := 0; turn < p.Turns; turn++ {
+	//	world = calculateNextState(p, world, 0, p.ImageWidth, 0, p.ImageHeight)
+	//}
+	if p.Threads == 1 {
+		for i := 0; i < p.Turns; i++ {
+			world = calculateNextState(p, world, 0, p.ImageWidth, 0, p.ImageHeight)
+			turn++
+		}
+	} else {
+		for i := 0; i < p.Threads; i++ {
+			channels[i] = make(chan [][]byte)
+		}
+		for i := 0; i < p.Turns; i++ {
+			// create a world for the next step
+			newWorld := make([][]byte, p.ImageHeight)
+			for i := range newWorld {
+				newWorld[i] = make([]byte, p.ImageWidth)
+			}
+
+			// create a worker for each thread
+			rowsPerWorker := p.ImageHeight / p.Threads
+			extraRows := p.ImageHeight % p.Threads
+			for w := 0; w < p.Threads; w++ {
+				startY := w * rowsPerWorker
+				endY := (w + 1) * rowsPerWorker
+				if w+1 == p.Threads { // Last worker might get extra rows
+					endY += extraRows
+				}
+				go worker(p, world, 0, p.ImageWidth, startY, endY, channels[w])
+			}
+			// append each workers result into a new world
+			for c := 0; c < p.Threads; c++ {
+				startY := c * rowsPerWorker
+				endY := startY + rowsPerWorker
+				if c == p.Threads-1 { // Last worker handles extra rows
+					endY += p.ImageHeight % p.Threads
+				}
+				copy(newWorld[startY:endY], <-channels[c])
+			}
+			world = newWorld
+			turn++
+		}
 	}
 	// TODO: Report the final state using FinalTurnCompleteEvent.
 
@@ -57,12 +100,13 @@ func distributor(p Params, c distributorChannels) {
 	close(c.events)
 }
 
-func calculateNextState(p Params, world [][]byte) [][]byte {
-
-	nextWorld := make([][]byte, p.ImageHeight)
+func calculateNextState(p Params, world [][]byte, startX, endX, startY, endY int) [][]byte {
+	height := endY - startY
+	width := endX - startX
+	nextWorld := make([][]byte, height)
 
 	for i := range nextWorld {
-		nextWorld[i] = make([]byte, p.ImageWidth)
+		nextWorld[i] = make([]byte, width)
 	}
 
 	countAlive := func(y, x int) int {
@@ -79,21 +123,21 @@ func calculateNextState(p Params, world [][]byte) [][]byte {
 		return alive
 	}
 
-	for y := 0; y < p.ImageHeight; y++ {
-		for x := 0; x < p.ImageWidth; x++ {
+	for y := startY; y < endY; y++ {
+		for x := startX; x < endX; x++ {
 			aliveNeighbour := countAlive(y, x)
 
 			if world[y][x] == 255 {
 				if aliveNeighbour < 2 || aliveNeighbour > 3 {
-					nextWorld[y][x] = 0
+					nextWorld[y-startY][x] = 0
 				} else {
-					nextWorld[y][x] = 255
+					nextWorld[y-startY][x] = 255
 				}
 			} else {
 				if aliveNeighbour == 3 {
-					nextWorld[y][x] = 255
+					nextWorld[y-startY][x] = 255
 				} else {
-					nextWorld[y][x] = 0
+					nextWorld[y-startY][x] = 0
 				}
 			}
 		}
@@ -114,4 +158,8 @@ func calculateAliveCells(p Params, world [][]byte) (int, []util.Cell) {
 		}
 	}
 	return count, alive
+}
+
+func worker(p Params, world [][]byte, startX, endX, startY, endY int, out chan<- [][]byte) {
+	out <- calculateNextState(p, world, startX, endX, startY, endY)
 }
