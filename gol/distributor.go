@@ -2,6 +2,7 @@ package gol
 
 import (
 	"fmt"
+	"sync"
 	"time"
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -18,14 +19,14 @@ type distributorChannels struct {
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels) {
 
+	var mu sync.Mutex
+
 	// TODO: Create a 2D slice to store the world.
-	world := make([][]byte, p.ImageHeight)
-	for i := range world {
-		world[i] = make([]byte, p.ImageWidth)
-	}
+	world := createWorld(p.ImageHeight, p.ImageWidth)
 
 	c.ioCommand <- ioInput
 	c.ioFilename <- fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
+
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
 			world[y][x] = <-c.ioInput
@@ -37,12 +38,27 @@ func distributor(p Params, c distributorChannels) {
 
 	turn := 0
 	c.events <- StateChange{turn, Executing}
-
 	// TODO: Execute all turns of the Game of Life.
+	ticker := time.NewTicker(2 * time.Second)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				mu.Lock()
+				if turn != 0 {
+					aliveCount, _ := calculateAliveCells(p, world)
+					c.events <- AliveCellsCount{CompletedTurns: turn, CellsCount: aliveCount}
+				}
+				mu.Unlock()
+			}
+		}
+	}()
 	if p.Threads == 1 {
 		for i := 0; i < p.Turns; i++ {
+			mu.Lock()
 			world = calculateNextState(p, world, 0, p.ImageWidth, 0, p.ImageHeight)
 			turn++
+			mu.Unlock()
 			c.events <- TurnComplete{turn}
 		}
 	} else {
@@ -51,11 +67,7 @@ func distributor(p Params, c distributorChannels) {
 		}
 		for i := 0; i < p.Turns; i++ {
 			// create a world for the next step
-			newWorld := make([][]byte, p.ImageHeight)
-			for i := range newWorld {
-				newWorld[i] = make([]byte, p.ImageWidth)
-			}
-
+			newWorld := createWorld(p.ImageHeight, p.ImageWidth)
 			// create a worker for each thread
 			//
 			// !!! COME BACK AND MAYBE TRY TO OPTIMISE
@@ -63,30 +75,44 @@ func distributor(p Params, c distributorChannels) {
 			// !!!
 			rowsPerWorker := p.ImageHeight / p.Threads
 			extraRows := p.ImageHeight % p.Threads
+			startY := 0
 			for w := 0; w < p.Threads; w++ {
-				startY := w * rowsPerWorker
-				endY := (w + 1) * rowsPerWorker
-				if w+1 == p.Threads { // Last worker might get extra rows
-					endY += extraRows
+				// Rows for current worker
+				numRows := rowsPerWorker
+				// Add a row if there are extra rows for workers than need doing
+				if extraRows > w {
+					numRows++
 				}
+				endY := startY + numRows
 				go worker(p, world, 0, p.ImageWidth, startY, endY, channels[w])
+				startY = endY
 			}
+
 			// append each workers result into a new world
+			startY = 0
 			for c := 0; c < p.Threads; c++ {
-				startY := c * rowsPerWorker
-				endY := startY + rowsPerWorker
-				if c == p.Threads-1 { // Last worker handles extra rows
-					endY += p.ImageHeight % p.Threads
+				numRows := rowsPerWorker
+				// Add a row if there are extra rows for workers than need doing
+				if extraRows > c {
+					numRows++
 				}
+				endY := startY + numRows
 				copy(newWorld[startY:endY], <-channels[c])
+				startY = endY
 			}
+			mu.Lock()
 			world = newWorld
 			turn++
+			mu.Unlock()
 			c.events <- TurnComplete{turn}
+
 		}
 	}
-	// TODO: Report the final state using FinalTurnCompleteEvent.
 
+	//c.ioCommand <- ioOutput
+	//c.ioFilename <- fmt.Sprintf("%dx%dx%d-%d", p.ImageWidth, p.ImageHeight, p.Turns, p.Threads)
+
+	// TODO: Report the final state using FinalTurnCompleteEvent.
 	finalAliveCells := make([]util.Cell, p.ImageWidth*p.ImageHeight)
 	_, finalAliveCells = calculateAliveCells(p, world)
 
@@ -97,6 +123,9 @@ func distributor(p Params, c distributorChannels) {
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
 
+	// Stops anonymous go routine from running, so it will not send on closed channel c
+	ticker.Stop()
+
 	c.events <- StateChange{turn, Quitting}
 
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
@@ -106,11 +135,7 @@ func distributor(p Params, c distributorChannels) {
 func calculateNextState(p Params, world [][]byte, startX, endX, startY, endY int) [][]byte {
 	height := endY - startY
 	width := endX - startX
-	nextWorld := make([][]byte, height)
-
-	for i := range nextWorld {
-		nextWorld[i] = make([]byte, width)
-	}
+	nextWorld := createWorld(height, width)
 
 	countAlive := func(y, x int) int {
 		alive := 0
@@ -167,13 +192,11 @@ func worker(p Params, world [][]byte, startX, endX, startY, endY int, out chan<-
 	out <- calculateNextState(p, world, startX, endX, startY, endY)
 }
 
-func ticker(p Params, world [][]byte, c distributorChannels) {
-	for {
-		time.Sleep(2 * time.Second)
-		aliveCount, _ := calculateAliveCells(p, world)
-		c.events <- AliveCellsCount{
-			CompletedTurns: TurnComplete{},
-			CellsCount:     aliveCount,
-		}
+// Function for creating world
+func createWorld(height, width int) [][]byte {
+	world := make([][]byte, height)
+	for i := range world {
+		world[i] = make([]byte, width)
 	}
+	return world
 }
