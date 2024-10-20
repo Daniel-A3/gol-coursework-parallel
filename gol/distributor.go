@@ -2,6 +2,7 @@ package gol
 
 import (
 	"fmt"
+	"time"
 	"uk.ac.bris.cs/gameoflife/util"
 )
 
@@ -31,20 +32,18 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}
 
-	// List of channels for workers
+	// List of channels for workers with the size of the amount of threads that are going to be used
 	channels := make([]chan [][]byte, p.Threads)
 
 	turn := 0
 	c.events <- StateChange{turn, Executing}
 
 	// TODO: Execute all turns of the Game of Life.
-	//for turn := 0; turn < p.Turns; turn++ {
-	//	world = calculateNextState(p, world, 0, p.ImageWidth, 0, p.ImageHeight)
-	//}
 	if p.Threads == 1 {
 		for i := 0; i < p.Turns; i++ {
 			world = calculateNextState(p, world, 0, p.ImageWidth, 0, p.ImageHeight)
 			turn++
+			c.events <- TurnComplete{turn}
 		}
 	} else {
 		for i := 0; i < p.Threads; i++ {
@@ -58,6 +57,10 @@ func distributor(p Params, c distributorChannels) {
 			}
 
 			// create a worker for each thread
+			//
+			// !!! COME BACK AND MAYBE TRY TO OPTIMISE
+			// Last worker takes all remainders in some cases
+			// !!!
 			rowsPerWorker := p.ImageHeight / p.Threads
 			extraRows := p.ImageHeight % p.Threads
 			for w := 0; w < p.Threads; w++ {
@@ -79,6 +82,7 @@ func distributor(p Params, c distributorChannels) {
 			}
 			world = newWorld
 			turn++
+			c.events <- TurnComplete{turn}
 		}
 	}
 	// TODO: Report the final state using FinalTurnCompleteEvent.
@@ -87,7 +91,6 @@ func distributor(p Params, c distributorChannels) {
 	_, finalAliveCells = calculateAliveCells(p, world)
 
 	finalState := FinalTurnComplete{p.Turns, finalAliveCells}
-
 	c.events <- finalState
 
 	// Make sure that the Io has finished any output before exiting.
@@ -162,4 +165,15 @@ func calculateAliveCells(p Params, world [][]byte) (int, []util.Cell) {
 
 func worker(p Params, world [][]byte, startX, endX, startY, endY int, out chan<- [][]byte) {
 	out <- calculateNextState(p, world, startX, endX, startY, endY)
+}
+
+func ticker(p Params, world [][]byte, c distributorChannels) {
+	for {
+		time.Sleep(2 * time.Second)
+		aliveCount, _ := calculateAliveCells(p, world)
+		c.events <- AliveCellsCount{
+			CompletedTurns: TurnComplete{},
+			CellsCount:     aliveCount,
+		}
+	}
 }
