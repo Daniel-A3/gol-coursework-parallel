@@ -27,12 +27,7 @@ func distributor(p Params, c distributorChannels) {
 	// Read the file
 	c.ioCommand <- ioInput
 	c.ioFilename <- fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
-
-	for y := 0; y < p.ImageHeight; y++ {
-		for x := 0; x < p.ImageWidth; x++ {
-			world[y][x] = <-c.ioInput
-		}
-	}
+	world = puttingInputIntoWorld(p, world, c)
 
 	// List of channels for workers with the size of the amount of threads that are going to be used
 	channels := make([]chan [][]byte, p.Threads)
@@ -57,7 +52,7 @@ func distributor(p Params, c distributorChannels) {
 	if p.Threads == 1 {
 		for i := 0; i < p.Turns; i++ {
 			mu.Lock()
-			world = calculateNextState(p, world, 0, p.ImageWidth, 0, p.ImageHeight)
+			world = calculateNextState(p, world, 0, p.ImageWidth, 0, p.ImageHeight, c, i+1)
 			turn++
 			mu.Unlock()
 			c.events <- TurnComplete{turn}
@@ -85,7 +80,7 @@ func distributor(p Params, c distributorChannels) {
 					numRows++
 				}
 				endY := startY + numRows
-				go worker(p, world, 0, p.ImageWidth, startY, endY, channels[w])
+				go worker(p, world, 0, p.ImageWidth, startY, endY, channels[w], c, i+1)
 				startY = endY
 			}
 
@@ -119,7 +114,9 @@ func distributor(p Params, c distributorChannels) {
 
 	// Outputs the final world into a pmg file
 	c.ioCommand <- ioOutput
-	c.ioFilename <- fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+	fileName := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+	c.ioFilename <- fileName
+	c.events <- ImageOutputComplete{p.Turns, fileName}
 	// sends each cell into output channel
 	go puttingWorldIntoOutput(p, world, c)
 
@@ -136,7 +133,7 @@ func distributor(p Params, c distributorChannels) {
 	close(c.events)
 }
 
-func calculateNextState(p Params, world [][]byte, startX, endX, startY, endY int) [][]byte {
+func calculateNextState(p Params, world [][]byte, startX, endX, startY, endY int, c distributorChannels, turn int) [][]byte {
 	height := endY - startY
 	width := endX - startX
 	nextWorld := createWorld(height, width)
@@ -162,12 +159,14 @@ func calculateNextState(p Params, world [][]byte, startX, endX, startY, endY int
 			if world[y][x] == 255 {
 				if aliveNeighbour < 2 || aliveNeighbour > 3 {
 					nextWorld[y-startY][x] = 0
+					c.events <- CellFlipped{turn, util.Cell{X: x, Y: y}}
 				} else {
 					nextWorld[y-startY][x] = 255
 				}
 			} else {
 				if aliveNeighbour == 3 {
 					nextWorld[y-startY][x] = 255
+					c.events <- CellFlipped{turn, util.Cell{X: x, Y: y}}
 				} else {
 					nextWorld[y-startY][x] = 0
 				}
@@ -192,8 +191,8 @@ func calculateAliveCells(p Params, world [][]byte) (int, []util.Cell) {
 	return count, alive
 }
 
-func worker(p Params, world [][]byte, startX, endX, startY, endY int, out chan<- [][]byte) {
-	out <- calculateNextState(p, world, startX, endX, startY, endY)
+func worker(p Params, world [][]byte, startX, endX, startY, endY int, out chan<- [][]byte, c distributorChannels, turn int) {
+	out <- calculateNextState(p, world, startX, endX, startY, endY, c, turn)
 }
 
 // Function for creating world
@@ -201,6 +200,18 @@ func createWorld(height, width int) [][]byte {
 	world := make([][]byte, height)
 	for i := range world {
 		world[i] = make([]byte, width)
+	}
+	return world
+}
+
+func puttingInputIntoWorld(p Params, world [][]byte, c distributorChannels) [][]byte {
+	for y := 0; y < p.ImageHeight; y++ {
+		for x := 0; x < p.ImageWidth; x++ {
+			world[y][x] = <-c.ioInput
+			if world[y][x] == 255 {
+				c.events <- CellFlipped{0, util.Cell{X: x, Y: y}}
+			}
+		}
 	}
 	return world
 }
