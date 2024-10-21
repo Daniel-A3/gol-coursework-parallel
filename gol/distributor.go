@@ -24,6 +24,7 @@ func distributor(p Params, c distributorChannels) {
 	// TODO: Create a 2D slice to store the world.
 	world := createWorld(p.ImageHeight, p.ImageWidth)
 
+	// Read the file
 	c.ioCommand <- ioInput
 	c.ioFilename <- fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
 
@@ -109,15 +110,18 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}
 
-	//c.ioCommand <- ioOutput
-	//c.ioFilename <- fmt.Sprintf("%dx%dx%d-%d", p.ImageWidth, p.ImageHeight, p.Turns, p.Threads)
-
 	// TODO: Report the final state using FinalTurnCompleteEvent.
 	finalAliveCells := make([]util.Cell, p.ImageWidth*p.ImageHeight)
 	_, finalAliveCells = calculateAliveCells(p, world)
 
 	finalState := FinalTurnComplete{p.Turns, finalAliveCells}
 	c.events <- finalState
+
+	// Outputs the final world into a pmg file
+	c.ioCommand <- ioOutput
+	c.ioFilename <- fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+	// sends each cell into output channel
+	go puttingWorldIntoOutput(p, world, c)
 
 	// Make sure that the Io has finished any output before exiting.
 	c.ioCommand <- ioCheckIdle
@@ -199,4 +203,12 @@ func createWorld(height, width int) [][]byte {
 		world[i] = make([]byte, width)
 	}
 	return world
+}
+
+func puttingWorldIntoOutput(p Params, world [][]byte, c distributorChannels) {
+	for y := 0; y < p.ImageHeight; y++ {
+		for x := 0; x < p.ImageWidth; x++ {
+			c.ioOutput <- world[y][x]
+		}
+	}
 }
