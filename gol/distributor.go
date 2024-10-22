@@ -25,13 +25,14 @@ func distributor(p Params, c distributorChannels) {
 	// TODO: Create a 2D slice to store the world.
 	world := createWorld(p.ImageHeight, p.ImageWidth)
 
-	// Read the file
-	c.ioCommand <- ioInput
-	c.ioFilename <- fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
-	world = puttingInputIntoWorld(p, world, c)
+	// Gets the world from input
+	world = inputToWorld(p, world, c)
 
 	// List of channels for workers with the size of the amount of threads that are going to be used
 	channels := make([]chan [][]byte, p.Threads)
+
+	quit := make(chan bool)
+	pause := make(chan bool)
 
 	turn := 0
 	c.events <- StateChange{turn, Executing}
@@ -50,26 +51,77 @@ func distributor(p Params, c distributorChannels) {
 			}
 		}
 	}()
-	if p.Threads == 1 {
-		for i := 0; i < p.Turns; i++ {
-			mu.Lock()
-			world = calculateNextState(p, world, 0, p.ImageWidth, 0, p.ImageHeight, c, i+1)
-			turn++
-			mu.Unlock()
-			c.events <- TurnComplete{turn}
+	// Recognising key presses
+	go func() {
+		for {
+			select {
+			case key := <-c.keyPresses:
+				switch key {
+				case 's':
+					mu.Lock()
+					// Puts current world into PMG file
+					worldToOutput(p, world, c, turn)
+					mu.Unlock()
+				case 'p':
+					pause <- true
+					fmt.Println('p')
+					c.events <- StateChange{turn, Paused}
+				case 'q':
+					quit <- true
+
+					mu.Lock()
+					terminate(p, world, c, turn)
+					// Stops anonymous go routine from running, so it will not send on closed channel c
+					ticker.Stop()
+
+					// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+					close(c.events)
+					mu.Unlock()
+
+					return
+				}
+
+			}
 		}
-	} else {
-		for i := 0; i < p.Threads; i++ {
-			channels[i] = make(chan [][]byte)
-		}
-		for i := 0; i < p.Turns; i++ {
-			// create a world for the next step
+	}()
+
+	for i := 0; i < p.Threads; i++ {
+		channels[i] = make(chan [][]byte)
+	}
+	for i := 0; i < p.Turns; i++ {
+		select {
+		case <-quit:
+			return
+		case <-pause:
+			paused := true
+			for paused {
+				key := <-c.keyPresses
+				switch key {
+				case 's':
+					worldToOutput(p, world, c, turn)
+				case 'q':
+					quit <- true
+
+					mu.Lock()
+					terminate(p, world, c, turn)
+					// Stops anonymous go routine from running, so it will not send on closed channel c
+					ticker.Stop()
+
+					// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+					close(c.events)
+					mu.Unlock()
+
+					return
+				case 'p':
+					c.events <- StateChange{turn, Executing}
+					paused = false
+				}
+			}
+		// create a world for the next step
+		default:
 			newWorld := createWorld(p.ImageHeight, p.ImageWidth)
+
 			// create a worker for each thread
-			//
-			// !!! COME BACK AND MAYBE TRY TO OPTIMISE
-			// Last worker takes all remainders in some cases
-			// !!!
 			rowsPerWorker := p.ImageHeight / p.Threads
 			extraRows := p.ImageHeight % p.Threads
 			startY := 0
@@ -102,7 +154,6 @@ func distributor(p Params, c distributorChannels) {
 			turn++
 			mu.Unlock()
 			c.events <- TurnComplete{turn}
-
 		}
 	}
 
@@ -113,13 +164,8 @@ func distributor(p Params, c distributorChannels) {
 	finalState := FinalTurnComplete{p.Turns, finalAliveCells}
 	c.events <- finalState
 
-	// Outputs the final world into a pmg file
-	c.ioCommand <- ioOutput
-	fileName := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
-	c.ioFilename <- fileName
-	c.events <- ImageOutputComplete{p.Turns, fileName}
-	// sends each cell into output channel
-	go puttingWorldIntoOutput(p, world, c)
+	// Outputs the final world into PMG file
+	worldToOutput(p, world, c, turn)
 
 	// Make sure that the Io has finished any output before exiting.
 	c.ioCommand <- ioCheckIdle
@@ -205,7 +251,10 @@ func createWorld(height, width int) [][]byte {
 	return world
 }
 
-func puttingInputIntoWorld(p Params, world [][]byte, c distributorChannels) [][]byte {
+func inputToWorld(p Params, world [][]byte, c distributorChannels) [][]byte {
+	// Read the file
+	c.ioCommand <- ioInput
+	c.ioFilename <- fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
 			world[y][x] = <-c.ioInput
@@ -217,10 +266,32 @@ func puttingInputIntoWorld(p Params, world [][]byte, c distributorChannels) [][]
 	return world
 }
 
-func puttingWorldIntoOutput(p Params, world [][]byte, c distributorChannels) {
+func worldToOutput(p Params, world [][]byte, c distributorChannels, turn int) {
+	// Outputs the final world into a pmg file
+	c.ioCommand <- ioOutput
+	fileName := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, turn)
+	c.ioFilename <- fileName
+	// sends each cell into output channel
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
 			c.ioOutput <- world[y][x]
 		}
 	}
+	c.events <- ImageOutputComplete{p.Turns, fileName}
+}
+
+func terminate(p Params, world [][]byte, c distributorChannels, turn int) {
+	finalAliveCells := make([]util.Cell, p.ImageWidth*p.ImageHeight)
+	_, finalAliveCells = calculateAliveCells(p, world)
+
+	finalState := FinalTurnComplete{p.Turns, finalAliveCells}
+	c.events <- finalState
+	// Outputs the final world into a pmg file
+	worldToOutput(p, world, c, turn)
+
+	// Make sure that the Io has finished any output before exiting.
+	c.ioCommand <- ioCheckIdle
+	<-c.ioIdle
+
+	c.events <- StateChange{turn, Quitting}
 }
