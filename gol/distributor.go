@@ -17,10 +17,11 @@ type distributorChannels struct {
 	keyPresses <-chan rune
 }
 
-// distributor divides the work between workers and interacts with other goroutines.
+// Distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels) {
 
 	var mu sync.Mutex
+	cond := sync.NewCond(&mu)
 
 	// TODO: Create a 2D slice to store the world.
 	world := createWorld(p.ImageHeight, p.ImageWidth)
@@ -33,24 +34,40 @@ func distributor(p Params, c distributorChannels) {
 
 	quit := make(chan bool)
 	pause := make(chan bool)
+	resume := make(chan bool)
 
 	turn := 0
 	c.events <- StateChange{turn, Executing}
-	// TODO: Execute all turns of the Game of Life.
 	ticker := time.NewTicker(2 * time.Second)
+	tickerRunning := true
+	gamePaused := false
+
+	// Anonymous go routine for ticker control
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				mu.Lock()
-				if turn != 0 {
-					aliveCount, _ := calculateAliveCells(p, world)
-					c.events <- AliveCellsCount{CompletedTurns: turn, CellsCount: aliveCount}
+				if tickerRunning {
+					mu.Lock()
+					if turn != 0 {
+						aliveCount, _ := calculateAliveCells(p, world)
+						c.events <- AliveCellsCount{CompletedTurns: turn, CellsCount: aliveCount}
+					}
+					mu.Unlock()
 				}
-				mu.Unlock()
+			case <-pause:
+				tickerRunning = false
+			case <-resume:
+				tickerRunning = true
+			case <-quit:
+				ticker.Stop()
+				return
 			}
 		}
 	}()
+
+	// TODO: Execute all turns of the Game of Life.
+
 	// Recognising key presses
 	go func() {
 		for {
@@ -59,28 +76,39 @@ func distributor(p Params, c distributorChannels) {
 				switch key {
 				case 's':
 					mu.Lock()
-					// Puts current world into PMG file
+					// Puts current world into PGM file
 					worldToOutput(p, world, c, turn)
 					mu.Unlock()
 				case 'p':
-					pause <- true
-					fmt.Println('p')
-					c.events <- StateChange{turn, Paused}
+					if !gamePaused {
+						pause <- true
+						gamePaused = true
+						fmt.Println("Paused")
+						c.events <- StateChange{turn, Paused}
+					} else {
+						resume <- true
+						gamePaused = false
+
+						cond.Broadcast() // Resume all paused workers
+
+						fmt.Println("Resumed")
+						c.events <- StateChange{turn, Executing}
+					}
 				case 'q':
-					quit <- true
 
 					mu.Lock()
+					fmt.Println("Quitting...")
 					terminate(p, world, c, turn)
 					// Stops anonymous go routine from running, so it will not send on closed channel c
 					ticker.Stop()
-
 					// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 					close(c.events)
 					mu.Unlock()
-
+					quit <- true
 					return
 				}
-
+			case <-quit:
+				return
 			}
 		}
 	}()
@@ -88,67 +116,59 @@ func distributor(p Params, c distributorChannels) {
 	for i := 0; i < p.Threads; i++ {
 		channels[i] = make(chan [][]byte)
 	}
+
+	// Main loop that handles turns
 	for i := 0; i < p.Turns; i++ {
 		select {
 		case <-quit:
+			mu.Unlock()
+			terminate(p, world, c, turn)
 			return
-		case <-pause:
-			paused := true
-			for paused {
-				key := <-c.keyPresses
-				switch key {
-				case 's':
-					worldToOutput(p, world, c, turn)
-				case 'q':
-					quit <- true
-
-					mu.Lock()
-					terminate(p, world, c, turn)
-					// Stops anonymous go routine from running, so it will not send on closed channel c
-					ticker.Stop()
-
-					// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
-					close(c.events)
+		default:
+			// Handle pause
+			mu.Lock()
+			for gamePaused {
+				cond.Wait() // Wait until resume signal
+				select {
+				case <-quit:
 					mu.Unlock()
-
+					terminate(p, world, c, turn)
 					return
-				case 'p':
-					c.events <- StateChange{turn, Executing}
-					paused = false
+				default:
 				}
 			}
-		// create a world for the next step
-		default:
+			mu.Unlock()
+
+			// Create a world for the next step
 			newWorld := createWorld(p.ImageHeight, p.ImageWidth)
 
-			// create a worker for each thread
+			// Create a worker for each thread
 			rowsPerWorker := p.ImageHeight / p.Threads
 			extraRows := p.ImageHeight % p.Threads
 			startY := 0
 			for w := 0; w < p.Threads; w++ {
-				// Rows for current worker
 				numRows := rowsPerWorker
-				// Add a row if there are extra rows for workers than need doing
 				if extraRows > w {
 					numRows++
 				}
 				endY := startY + numRows
-				go worker(p, world, 0, p.ImageWidth, startY, endY, channels[w], c, i+1)
+				go worker(p, world, 0, p.ImageWidth, startY, endY, channels[w], c, i+1, quit)
 				startY = endY
 			}
 
-			// append each workers result into a new world
+			// Append each worker's result into the new world
 			startY = 0
-			for c := 0; c < p.Threads; c++ {
+			for w := 0; w < p.Threads; w++ {
 				numRows := rowsPerWorker
-				// Add a row if there are extra rows for workers than need doing
-				if extraRows > c {
+				if extraRows > w {
 					numRows++
 				}
 				endY := startY + numRows
-				copy(newWorld[startY:endY], <-channels[c])
+				copy(newWorld[startY:endY], <-channels[w])
 				startY = endY
 			}
+
+			// Update the world and increment the turn
 			mu.Lock()
 			world = newWorld
 			turn++
@@ -164,12 +184,12 @@ func distributor(p Params, c distributorChannels) {
 	finalState := FinalTurnComplete{p.Turns, finalAliveCells}
 	c.events <- finalState
 
-	// Outputs the final world into PMG file
-	worldToOutput(p, world, c, turn)
-
 	// Make sure that the Io has finished any output before exiting.
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
+
+	// Outputs the final world into PMG file
+	worldToOutput(p, world, c, turn)
 
 	// Stops anonymous go routine from running, so it will not send on closed channel c
 	ticker.Stop()
@@ -179,6 +199,8 @@ func distributor(p Params, c distributorChannels) {
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 	close(c.events)
 }
+
+// Helper functions
 
 func calculateNextState(p Params, world [][]byte, startX, endX, startY, endY int, c distributorChannels, turn int) [][]byte {
 	height := endY - startY
@@ -238,8 +260,13 @@ func calculateAliveCells(p Params, world [][]byte) (int, []util.Cell) {
 	return count, alive
 }
 
-func worker(p Params, world [][]byte, startX, endX, startY, endY int, out chan<- [][]byte, c distributorChannels, turn int) {
-	out <- calculateNextState(p, world, startX, endX, startY, endY, c, turn)
+func worker(p Params, world [][]byte, startX, endX, startY, endY int, out chan<- [][]byte, c distributorChannels, turn int, quit <-chan bool) {
+	select {
+	case out <- calculateNextState(p, world, startX, endX, startY, endY, c, turn):
+	case <-quit:
+		return
+	}
+
 }
 
 // Function for creating world
@@ -268,6 +295,7 @@ func inputToWorld(p Params, world [][]byte, c distributorChannels) [][]byte {
 
 func worldToOutput(p Params, world [][]byte, c distributorChannels, turn int) {
 	// Outputs the final world into a pmg file
+
 	c.ioCommand <- ioOutput
 	fileName := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, turn)
 	c.ioFilename <- fileName
@@ -277,7 +305,9 @@ func worldToOutput(p Params, world [][]byte, c distributorChannels, turn int) {
 			c.ioOutput <- world[y][x]
 		}
 	}
-	c.events <- ImageOutputComplete{p.Turns, fileName}
+	c.ioCommand <- ioCheckIdle
+
+	c.events <- ImageOutputComplete{turn, fileName}
 }
 
 func terminate(p Params, world [][]byte, c distributorChannels, turn int) {
