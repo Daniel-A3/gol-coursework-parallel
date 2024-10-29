@@ -21,7 +21,7 @@ type distributorChannels struct {
 func distributor(p Params, c distributorChannels) {
 
 	var mu sync.Mutex
-
+	cond := sync.NewCond(&mu)
 	// TODO: Create a 2D slice to store the world.
 	world := createWorld(p.ImageHeight, p.ImageWidth)
 
@@ -31,19 +31,22 @@ func distributor(p Params, c distributorChannels) {
 	// List of channels for workers with the size of the amount of threads that are going to be used
 	channels := make([]chan [][]byte, p.Threads)
 
-	quit := make(chan bool)
-	pause := make(chan bool)
+	quit := false
+	//pause := make(chan bool)
+	//resume := make(chan bool)
+	gamePaused := false
 
 	turn := 0
 	c.events <- StateChange{turn, Executing}
 	// TODO: Execute all turns of the Game of Life.
 	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
 				mu.Lock()
-				if turn != 0 {
+				if turn != 0 && !gamePaused {
 					aliveCount, _ := calculateAliveCells(p, world)
 					c.events <- AliveCellsCount{CompletedTurns: turn, CellsCount: aliveCount}
 				}
@@ -63,21 +66,26 @@ func distributor(p Params, c distributorChannels) {
 					worldToOutput(p, world, c, turn)
 					mu.Unlock()
 				case 'p':
-					pause <- true
-					fmt.Println('p')
-					c.events <- StateChange{turn, Paused}
+					if !gamePaused {
+						//pause <- true
+						gamePaused = true
+						fmt.Println("Paused")
+						c.events <- StateChange{turn, Paused}
+					} else {
+						//resume <- true
+						gamePaused = false
+
+						cond.Broadcast() // Resume all paused workers
+
+						fmt.Println("Resumed")
+						c.events <- StateChange{turn, Executing}
+					}
 				case 'q':
-					quit <- true
-
-					mu.Lock()
-					terminate(p, world, c, turn)
-					// Stops anonymous go routine from running, so it will not send on closed channel c
-					ticker.Stop()
-
-					// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
-					close(c.events)
-					mu.Unlock()
-
+					quit = true
+					if gamePaused {
+						gamePaused = !gamePaused
+						cond.Broadcast()
+					}
 					return
 				}
 
@@ -90,35 +98,14 @@ func distributor(p Params, c distributorChannels) {
 	}
 	for i := 0; i < p.Turns; i++ {
 		select {
-		case <-quit:
-			return
-		case <-pause:
-			paused := true
-			for paused {
-				key := <-c.keyPresses
-				switch key {
-				case 's':
-					worldToOutput(p, world, c, turn)
-				case 'q':
-					quit <- true
-
-					mu.Lock()
-					terminate(p, world, c, turn)
-					// Stops anonymous go routine from running, so it will not send on closed channel c
-					ticker.Stop()
-
-					// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
-					close(c.events)
-					mu.Unlock()
-
-					return
-				case 'p':
-					c.events <- StateChange{turn, Executing}
-					paused = false
-				}
-			}
 		// create a world for the next step
 		default:
+			mu.Lock()
+			for gamePaused {
+				cond.Wait()
+			}
+			mu.Unlock()
+
 			newWorld := createWorld(p.ImageHeight, p.ImageWidth)
 
 			// create a worker for each thread
@@ -139,14 +126,14 @@ func distributor(p Params, c distributorChannels) {
 
 			// append each workers result into a new world
 			startY = 0
-			for c := 0; c < p.Threads; c++ {
+			for j := 0; j < p.Threads; j++ {
 				numRows := rowsPerWorker
 				// Add a row if there are extra rows for workers than need doing
-				if extraRows > c {
+				if extraRows > j {
 					numRows++
 				}
 				endY := startY + numRows
-				copy(newWorld[startY:endY], <-channels[c])
+				copy(newWorld[startY:endY], <-channels[j])
 				startY = endY
 			}
 			mu.Lock()
@@ -154,29 +141,16 @@ func distributor(p Params, c distributorChannels) {
 			turn++
 			mu.Unlock()
 			c.events <- TurnComplete{turn}
+			if quit {
+				terminate(p, world, c, turn)
+				close(c.events)
+				return
+			}
 		}
 	}
 
 	// TODO: Report the final state using FinalTurnCompleteEvent.
-	finalAliveCells := make([]util.Cell, p.ImageWidth*p.ImageHeight)
-	_, finalAliveCells = calculateAliveCells(p, world)
-
-	finalState := FinalTurnComplete{p.Turns, finalAliveCells}
-	c.events <- finalState
-
-	// Outputs the final world into PMG file
-	worldToOutput(p, world, c, turn)
-
-	// Make sure that the Io has finished any output before exiting.
-	c.ioCommand <- ioCheckIdle
-	<-c.ioIdle
-
-	// Stops anonymous go routine from running, so it will not send on closed channel c
-	ticker.Stop()
-
-	c.events <- StateChange{turn, Quitting}
-
-	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+	terminate(p, world, c, turn)
 	close(c.events)
 }
 
@@ -277,7 +251,9 @@ func worldToOutput(p Params, world [][]byte, c distributorChannels, turn int) {
 			c.ioOutput <- world[y][x]
 		}
 	}
-	c.events <- ImageOutputComplete{p.Turns, fileName}
+	c.ioCommand <- ioCheckIdle
+	<-c.ioIdle
+	c.events <- ImageOutputComplete{turn, fileName}
 }
 
 func terminate(p Params, world [][]byte, c distributorChannels, turn int) {
@@ -294,4 +270,5 @@ func terminate(p Params, world [][]byte, c distributorChannels, turn int) {
 	<-c.ioIdle
 
 	c.events <- StateChange{turn, Quitting}
+
 }
