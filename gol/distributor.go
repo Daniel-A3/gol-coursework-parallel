@@ -68,24 +68,30 @@ func distributor(p Params, c distributorChannels) {
 				case 'p':
 					if !gamePaused {
 						//pause <- true
+						mu.Lock()
 						gamePaused = true
 						fmt.Println("Paused")
 						c.events <- StateChange{turn, Paused}
+						mu.Unlock()
 					} else {
 						//resume <- true
+						mu.Lock()
 						gamePaused = false
 
 						cond.Broadcast() // Resume all paused workers
 
 						fmt.Println("Resumed")
 						c.events <- StateChange{turn, Executing}
+						mu.Unlock()
 					}
 				case 'q':
+					mu.Lock()
 					quit = true
 					if gamePaused {
 						gamePaused = !gamePaused
 						cond.Broadcast()
 					}
+					mu.Unlock()
 					return
 				}
 
