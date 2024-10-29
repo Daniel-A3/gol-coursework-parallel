@@ -1,6 +1,4 @@
 package gol
-<<<<<<< HEAD
-=======
 
 import (
 	"fmt"
@@ -276,4 +274,3 @@ func terminate(p Params, world [][]byte, c distributorChannels, turn int) {
 	c.events <- StateChange{turn, Quitting}
 
 }
->>>>>>> mykola-test
