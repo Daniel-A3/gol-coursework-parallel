@@ -99,55 +99,53 @@ func distributor(p Params, c distributorChannels) {
 		channels[i] = make(chan [][]byte)
 	}
 	for i := 0; i < p.Turns; i++ {
-		select {
 		// create a world for the next step
-		default:
-			mu.Lock()
-			for gamePaused {
-				cond.Wait()
-			}
-			mu.Unlock()
 
-			newWorld := createWorld(p.ImageHeight, p.ImageWidth)
+		mu.Lock()
+		for gamePaused {
+			cond.Wait()
+		}
+		mu.Unlock()
 
-			// create a worker for each thread
-			rowsPerWorker := p.ImageHeight / p.Threads
-			extraRows := p.ImageHeight % p.Threads
-			startY := 0
-			for w := 0; w < p.Threads; w++ {
-				// Rows for current worker
-				numRows := rowsPerWorker
-				// Add a row if there are extra rows for workers than need doing
-				if extraRows > w {
-					numRows++
-				}
-				endY := startY + numRows
-				go worker(p, world, 0, p.ImageWidth, startY, endY, channels[w], c, i+1)
-				startY = endY
-			}
+		newWorld := createWorld(p.ImageHeight, p.ImageWidth)
 
-			// append each workers result into a new world
-			startY = 0
-			for j := 0; j < p.Threads; j++ {
-				numRows := rowsPerWorker
-				// Add a row if there are extra rows for workers than need doing
-				if extraRows > j {
-					numRows++
-				}
-				endY := startY + numRows
-				copy(newWorld[startY:endY], <-channels[j])
-				startY = endY
+		// create a worker for each thread
+		rowsPerWorker := p.ImageHeight / p.Threads
+		extraRows := p.ImageHeight % p.Threads
+		startY := 0
+		for w := 0; w < p.Threads; w++ {
+			// Rows for current worker
+			numRows := rowsPerWorker
+			// Add a row if there are extra rows for workers than need doing
+			if extraRows > w {
+				numRows++
 			}
-			mu.Lock()
-			world = newWorld
-			turn++
-			mu.Unlock()
-			c.events <- TurnComplete{turn}
-			if quit {
-				terminate(p, world, c, turn)
-				close(c.events)
-				return
+			endY := startY + numRows
+			go worker(p, world, 0, p.ImageWidth, startY, endY, channels[w], c, i+1)
+			startY = endY
+		}
+
+		// append each workers result into a new world
+		startY = 0
+		for j := 0; j < p.Threads; j++ {
+			numRows := rowsPerWorker
+			// Add a row if there are extra rows for workers than need doing
+			if extraRows > j {
+				numRows++
 			}
+			endY := startY + numRows
+			copy(newWorld[startY:endY], <-channels[j])
+			startY = endY
+		}
+		mu.Lock()
+		world = newWorld
+		turn++
+		mu.Unlock()
+		c.events <- TurnComplete{turn}
+		if quit {
+			terminate(p, world, c, turn)
+			close(c.events)
+			return
 		}
 	}
 
