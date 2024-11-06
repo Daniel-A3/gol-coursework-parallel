@@ -144,6 +144,7 @@ func distributor(p Params, c distributorChannels) {
 		c.events <- TurnComplete{turn}
 		if quit {
 			terminate(p, world, c, turn)
+			ticker.Stop()
 			close(c.events)
 			return
 		}
@@ -151,6 +152,7 @@ func distributor(p Params, c distributorChannels) {
 
 	// TODO: Report the final state using FinalTurnCompleteEvent.
 	terminate(p, world, c, turn)
+	ticker.Stop()
 	close(c.events)
 }
 
