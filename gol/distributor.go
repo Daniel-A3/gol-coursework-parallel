@@ -44,7 +44,7 @@ func distributor(p Params, c distributorChannels) {
 			select {
 			case <-ticker.C:
 				mu.Lock()
-				if turn != 0 && !gamePaused {
+				if turn != 0 && !gamePaused && !quit {
 					aliveCount, _ := calculateAliveCells(p, world)
 					c.events <- AliveCellsCount{CompletedTurns: turn, CellsCount: aliveCount}
 				}
@@ -82,6 +82,7 @@ func distributor(p Params, c distributorChannels) {
 					}
 				case 'q':
 					mu.Lock()
+					ticker.Stop()
 					quit = true
 					if gamePaused {
 						gamePaused = !gamePaused
@@ -149,7 +150,7 @@ func distributor(p Params, c distributorChannels) {
 			return
 		}
 	}
-
+	quit = true
 	// TODO: Report the final state using FinalTurnCompleteEvent.
 	terminate(p, world, c, turn)
 	ticker.Stop()
