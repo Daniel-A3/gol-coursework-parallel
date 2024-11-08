@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
 	"uk.ac.bris.cs/gameoflife/util"
 )
 
