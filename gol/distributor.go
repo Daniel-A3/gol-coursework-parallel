@@ -33,8 +33,6 @@ func distributor(p Params, c distributorChannels) {
 	channels := make([]chan [][]byte, p.Threads)
 
 	quit := false
-	//pause := make(chan bool)
-	//resume := make(chan bool)
 	gamePaused := false
 
 	turn := 0
@@ -68,14 +66,12 @@ func distributor(p Params, c distributorChannels) {
 					mu.Unlock()
 				case 'p':
 					if !gamePaused {
-						//pause <- true
 						mu.Lock()
 						gamePaused = true
 						fmt.Println("Paused")
 						c.events <- StateChange{turn, Paused}
 						mu.Unlock()
 					} else {
-						//resume <- true
 						mu.Lock()
 						gamePaused = false
 
